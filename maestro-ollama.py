@@ -16,9 +16,9 @@ import argparse
 # ollama.pull('llama3:instruct')
 
 # Define model identifiers as variables at the top of the script
-ORCHESTRATOR_MODEL = 'llama3:70b-instruct'
-SUBAGENT_MODEL = 'llama3:instruct'
-REFINER_MODEL = 'llama3:70b-instruct'
+ORCHESTRATOR_MODEL = 'qwen2:7b'
+SUBAGENT_MODEL = 'qwen2:7b'
+REFINER_MODEL = 'qwen2:7b'
 
 # check and pull models if they don't exist yet
 for model in [ORCHESTRATOR_MODEL, SUBAGENT_MODEL, REFINER_MODEL]:

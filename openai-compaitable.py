@@ -1,48 +1,42 @@
 import os
 import re
-from rich.console import Console
-from rich.panel import Panel
 from datetime import datetime
 import json
+from rich.console import Console
+from rich.panel import Panel
+from openai import OpenAI
+import argparse
 
-# Set up the Groq API client
-from groq import Groq
-import os
 
-client = Groq(api_key="YOUR API KEY")
+# Define model identifiers as variables at the top of the script
+ORCHESTRATOR_MODEL = "deepseek-chat"
+SUBAGENT_MODEL = 'deepseek-chat'
+REFINER_MODEL = 'deepseek-chat'
 
-# Define the models to use for each agent
-ORCHESTRATOR_MODEL = "mixtral-8x7b-32768"
-SUB_AGENT_MODEL = "mixtral-8x7b-32768"
-REFINER_MODEL = "llama3-70b-8192"
 
-# Initialize the Rich Console
+# Initialize the OpenAI client
+client = OpenAI(api_key="sk-3f95c69432c74dd081c7e59cb95bb7c6", base_url="https://api.deepseek.com")
+
 console = Console()
 
 def opus_orchestrator(objective, file_content=None, previous_results=None):
-    console.print(f"\n[bold]Calling Orchestrator for your objective[/bold]")
+    console.print(f"\n[bold]Calling DeepSeek Orchestrator for your objective[/bold]")
     previous_results_text = "\n".join(previous_results) if previous_results else "None"
     if file_content:
         console.print(Panel(f"File content:\n{file_content}", title="[bold blue]File Content[/bold blue]", title_align="left", border_style="blue"))
-    messages = [
-        {
-            "role": "system",
-            "content": "You are an AI orchestrator that breaks down objectives into sub-tasks."
-        },
-        {
-            "role": "user",
-            "content": f"Based on the following objective{' and file content' if file_content else ''}, and the previous sub-task results (if any), please break down the objective into the next sub-task, and create a concise and detailed prompt for a subagent so it can execute that task. IMPORTANT!!! when dealing with code tasks make sure you check the code for errors and provide fixes and support as part of the next sub-task. If you find any bugs or have suggestions for better code, please include them in the next sub-task prompt. Please assess if the objective has been fully achieved. If the previous sub-task results comprehensively address all aspects of the objective, include the phrase 'The task is complete:' at the beginning of your response. If the objective is not yet fully achieved, break it down into the next sub-task and create a concise and detailed prompt for a subagent to execute that task.:\n\nObjective: {objective}" + ('\\nFile content:\\n' + file_content if file_content else '') + f"\n\nPrevious sub-task results:\n{previous_results_text}"
-        }
-    ]
-
-    opus_response = client.chat.completions.create(
+    
+    response = client.chat.completions.create(
         model=ORCHESTRATOR_MODEL,
-        messages=messages,
-        max_tokens=8000
+        messages=[
+            {
+                "role": "user",
+                "content": f"Based on the following objective{' and file content' if file_content else ''}, and the previous sub-task results (if any), please break down the objective into the next sub-task, and create a concise and detailed prompt for a subagent so it can execute that task. Focus solely on the objective and avoid engaging in casual conversation with the subagent.\n\nWhen dealing with code tasks, make sure to check the code for errors and provide fixes and support as part of the next sub-task. If you find any bugs or have suggestions for better code, please include them in the next sub-task prompt.\n\nPlease assess if the objective has been fully achieved. If the previous sub-task results comprehensively address all aspects of the objective, include the phrase 'The task is complete:' at the beginning of your response. If the objective is not yet fully achieved, break it down into the next sub-task and create a concise and detailed prompt for a subagent to execute that task.\n\nObjective: {objective}" + (f'\nFile content:\n{file_content}' if file_content else '') + f"\n\nPrevious sub-task results:\n{previous_results_text}"
+            }
+        ]
     )
-
-    response_text = opus_response.choices[0].message.content
-    console.print(Panel(response_text, title=f"[bold green]Groq Orchestrator[/bold green]", title_align="left", border_style="green", subtitle="Sending task to Subagent 👇"))
+    
+    response_text = response.choices[0].message.content
+    console.print(Panel(response_text, title="[bold green]DeepSeek Orchestrator[/bold green]", title_align="left", border_style="green", subtitle="Sending task to DeepSeek sub-agent 👇"))
     return response_text, file_content
 
 def haiku_sub_agent(prompt, previous_haiku_tasks=None, continuation=False):
@@ -50,64 +44,64 @@ def haiku_sub_agent(prompt, previous_haiku_tasks=None, continuation=False):
         previous_haiku_tasks = []
 
     continuation_prompt = "Continuing from the previous answer, please complete the response."
-    system_message = "Previous Haiku tasks:\n" + "\n".join(f"Task: {task['task']}\nResult: {task['result']}" for task in previous_haiku_tasks)
     if continuation:
         prompt = continuation_prompt
 
-    messages = [
-        {
-            "role": "system",
-            "content": system_message
-        },
-        {
-            "role": "user",
-            "content": prompt
-        }
-    ]
+    # Compile previous tasks into a readable format
+    previous_tasks_summary = "Previous Sub-agent tasks:\n" + "\n".join(f"Task: {task['task']}\nResult: {task['result']}" for task in previous_haiku_tasks)
+    
+    # Append previous tasks summary to the prompt
+    full_prompt = f"{previous_tasks_summary}\n\n{prompt}"
 
-    haiku_response = client.chat.completions.create(
-        model=SUB_AGENT_MODEL,
-        messages=messages,
-        max_tokens=8000
+    # Ensure prompt is not empty
+    if not full_prompt.strip():
+        raise ValueError("Prompt cannot be empty")
+
+    response = client.chat.completions.create(
+        model=SUBAGENT_MODEL, 
+        messages=[{"role": "user", "content": full_prompt}]
     )
+    
+    response_text = response.choices[0].message.content
+    
+    if len(response_text) >= 4000:  # Threshold set to 4000 as a precaution
+        console.print("[bold yellow]Warning:[/bold yellow] Output may be truncated. Attempting to continue the response.")
+        continuation_response_text = haiku_sub_agent(continuation_prompt, previous_haiku_tasks, continuation=True)
+        response_text += continuation_response_text
 
-    response_text = haiku_response.choices[0].message.content
-    console.print(Panel(response_text, title="[bold blue]Groq Sub-agent Result[/bold blue]", title_align="left", border_style="blue", subtitle="Task completed, sending result to Orchestrator 👇"))
+    console.print(Panel(response_text, title="[bold blue]DeepSeek Sub-agent Result[/bold blue]", title_align="left", border_style="blue", subtitle="Task completed, sending result to DeepSeek Orchestrator 👇"))
     return response_text
 
 def opus_refine(objective, sub_task_results, filename, projectname, continuation=False):
-    console.print("\nCalling Opus to provide the refined final output for your objective:")
-    messages = [
-        {
-            "role": "system",
-            "content": "You are an AI assistant that refines sub-task results into a cohesive final output."
-        },
-        {
-            "role": "user",
-            "content": "Objective: " + objective + "\n\nSub-task results:\n" + "\n".join(sub_task_results) + "\n\nPlease review and refine the sub-task results into a cohesive final output. Add any missing information or details as needed. Make sure the code files are completed. When working on code projects, ONLY AND ONLY IF THE PROJECT IS CLEARLY A CODING ONE please provide the following:\n1. Project Name: Create a concise and appropriate project name that fits the project based on what it's creating. The project name should be no more than 20 characters long.\n2. Folder Structure: Provide the folder structure as a valid JSON object, where each key represents a folder or file, and nested keys represent subfolders. Use null values for files. Ensure the JSON is properly formatted without any syntax errors. Please make sure all keys are enclosed in double quotes, and ensure objects are correctly encapsulated with braces, separating items with commas as necessary.\nWrap the JSON object in <folder_structure> tags.\n3. Code Files: For each code file, include ONLY the file name in this format 'Filename: <filename>' NEVER EVER USE THE FILE PATH OR ANY OTHER FORMATTING YOU ONLY USE THE FOLLOWING format 'Filename: <filename>' followed by the code block enclosed in triple backticks, with the language identifier after the opening backticks, like this:\n\n​python\n<code>\n​"
-        }
-    ]
-
-    opus_response = client.chat.completions.create(
+    console.print("\nCalling DeepSeek to provide the refined final output for your objective:")
+    
+    response = client.chat.completions.create(
         model=REFINER_MODEL,
-        messages=messages,
-        max_tokens=8000
+        messages=[
+            {
+                "role": "user",
+                "content": "Objective: " + objective + "\n\nSub-task results:\n" + "\n".join(sub_task_results) + "\n\nPlease review and refine the sub-task results into a cohesive final output. Add any missing information or details as needed.\n\nWhen working on code projects, ONLY AND ONLY IF THE PROJECT IS CLEARLY A CODING ONE, please provide the following:\n\n1. Project Name: Create a concise and appropriate project name that fits the project based on what it's creating. The project name should be no more than 20 characters long.\n\n2. Folder Structure: Provide the folder structure as a valid JSON object, where each key represents a folder or file, and nested keys represent subfolders. Use null values for files. Ensure the JSON is properly formatted without any syntax errors. Please make sure all keys are enclosed in double quotes, and ensure objects are correctly encapsulated with braces, separating items with commas as necessary. Wrap the JSON object in <folder_structure> tags.\n\n3. Code Files: For each code file, include ONLY the file name, NEVER EVER USE THE FILE PATH OR ANY OTHER FORMATTING. YOU ONLY USE THE FOLLOWING format 'Filename: <filename>' followed by the code block enclosed in triple backticks, with the language identifier after the opening backticks, like this:\n\npython\n<code>\n\n\nFocus solely on the objective and avoid engaging in casual conversation. Ensure the final output is clear, concise, and addresses all aspects of the objective.​"
+            }
+        ]
     )
+    
+    response_text = response.choices[0].message.content
+    
+    if len(response_text) >= 4000:  # Threshold set to 4000 as a precaution
+        console.print("[bold yellow]Warning:[/bold yellow] Output may be truncated. Attempting to continue the response.")
+        continuation_response_text = opus_refine(objective, sub_task_results, filename, projectname, continuation=True)
+        response_text += continuation_response_text
 
-    response_text = opus_response.choices[0].message.content
     console.print(Panel(response_text, title="[bold green]Final Output[/bold green]", title_align="left", border_style="green"))
     return response_text
 
 def create_folder_structure(project_name, folder_structure, code_blocks):
-    # Create the project folder
     try:
         os.makedirs(project_name, exist_ok=True)
-        console.print(Panel(f"Created project folder: [bold]{project_name}[/bold]", title="[bold green]Project Folder[/bold green]", title_align="left", border_style="green"))
+        console.print(Panel(f"Created project folder: [bold]{project_name}[/bold]", title="[bold blue]Project Folder Creation[/bold blue]", title_align="left", border_style="blue"))
     except OSError as e:
         console.print(Panel(f"Error creating project folder: [bold]{project_name}[/bold]\nError: {e}", title="[bold red]Project Folder Creation Error[/bold red]", title_align="left", border_style="red"))
-        return
 
-    # Recursively create the folder structure and files
     create_folders_and_files(project_name, folder_structure, code_blocks)
 
 def create_folders_and_files(current_path, structure, code_blocks):
@@ -136,9 +130,46 @@ def read_file(file_path):
     with open(file_path, 'r') as file:
         content = file.read()
     return content
+   
+def has_task_data():
+    return os.path.exists('task_data.json')
 
-# Get the objective from user input
-objective = input("Please enter your objective with or without a text file path: ")
+def read_task_data():
+    with open('task_data.json', 'r') as file:
+        task_data = json.load(file)
+    return task_data
+
+
+def write_task_data(task_data):
+    with open('task_data.json', 'w') as file:
+        json.dump(task_data, file)
+
+
+continue_from_last_task = False
+tmp_task_data = {}
+
+# parse args
+parser = argparse.ArgumentParser()
+parser.add_argument('-p', '--prompt', type=str, help='Please enter your objective with or without a text file path')
+args = parser.parse_args()
+
+if args.prompt is not None:
+    objective = args.prompt
+else:
+    # Check if there is a task data file
+    if has_task_data():
+        continue_from_last_task = input("Do you want to continue from the last task? (y/n): ").lower() == 'y'
+
+    if continue_from_last_task:
+        tmp_task_data = read_task_data()
+        objective = tmp_task_data['objective']
+        task_exchanges = tmp_task_data['task_exchanges']
+        console.print(Panel(f"Resuming from last task: {objective}", title="[bold blue]Resuming from last task[/bold blue]", title_align="left", border_style="blue"))
+    else:
+        # Get the objective from user input
+        objective = input("Please enter your objective with or without a text file path: ")
+        tmp_task_data['objective'] = objective
+        tmp_task_data['task_exchanges'] = []
 
 # Check if the input contains a file path
 if "./" in objective or "/" in objective:
@@ -179,6 +210,10 @@ while True:
         haiku_tasks.append({"task": sub_task_prompt, "result": sub_task_result})
         # Record the exchange for processing and output generation
         task_exchanges.append((sub_task_prompt, sub_task_result))
+        # Update the task data with the new task exchanges
+        tmp_task_data['task_exchanges'] = task_exchanges
+        # Save the task data to a JSON file for resuming later
+        write_task_data(tmp_task_data)
         # Prevent file content from being included in future haiku_sub_agent calls
         file_content_for_haiku = None
 
